@@ -1,0 +1,396 @@
+---
+title: "Sentiment Analysis - Ebola"
+author: "Ajinkya Sheth"
+date: "June 13, 2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+library(zoo)
+library(dplyr)
+library(pander)
+library(tidytext)
+library(tm)
+library(ggplot2)
+library(ggthemes)
+library(tidyr)
+#library(corpus)
+library(wordcloud)
+library(hash)
+library(sf)
+library(tmap)
+
+library(raster)
+library(spData)
+
+library(sentimentr)
+library(ggmap)
+
+library(gganimate)
+
+library(gifski)
+library(transformr)
+
+library(mapproj)
+
+library(scales)
+library(gridExtra)
+SIERRALEONE_SHP <- read_sf('./SLE_adm3.shp')
+```
+```{r}
+trigger <- read.csv(file="./Trigger_Other.csv", header=TRUE, sep=",", stringsAsFactors = FALSE)
+
+```
+
+```{r}
+concerns=trigger$t_q6
+questions=trigger$t_q7
+risks=trigger$t_q8
+byelaws=trigger$t_q9
+discussions=trigger$t_q10
+capability=trigger$t_q11
+
+```
+
+
+```{r}
+concerns_df <- tibble(line = 1:length(concerns),text=concerns )
+tidy_corpus <- concerns_df %>% 
+  unnest_tokens(word, text)
+data('stop_words')
+tidy_corpus <- tidy_corpus %>% 
+  anti_join(stop_words)
+
+
+```
+
+## 1 Explorations
+### 1.1 Word Counts
+
+```{r}
+tidy_corpus %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 100) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+    geom_col() +
+    xlab(NULL) +
+    coord_flip() +
+  theme_tufte()
+```
+
+```{r}
+tidy_corpus=tidy_corpus[tidy_corpus$word != "ebola",]
+tidy_corpus=tidy_corpus[!is.na(tidy_corpus$word),]
+
+corpus_sentiment <- tidy_corpus %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+
+word_counts <- tidy_corpus %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+```
+
+### 1.2 Positive and Negative - Word Frequencies
+
+```{r}
+positive_sentiment <- corpus_sentiment %>%
+  filter(sentiment>0) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+word_counts %>%
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to sentiment",
+       x = NULL) +
+  coord_flip() +
+  theme_tufte()
+```
+
+### 1.3 Positive and Negative - Word Clouds
+
+```{r}
+layout(matrix(c(1, 2), nrow=2), heights=c(1, 6))
+par(mar=rep(0, 4))
+plot.new()
+text(x=0.5, y=0.5, "Positive Sentiment")
+
+word_counts %>%
+  filter(sentiment=='positive') %>%
+  with(wordcloud(word, n, max.words = 50))
+
+layout(matrix(c(1, 2), nrow=2), heights=c(1, 6))
+par(mar=rep(0, 4))
+plot.new()
+text(x=0.5, y=0.5, "Negative Sentiment")
+word_counts %>%
+  filter(sentiment=='negative') %>%
+  with(wordcloud(word, n, max.words = 50))
+```
+
+### 1.4 Sentimentr tests
+
+sentimentr tests
+```{r}
+sentences_list <- c("I like ice-cream", 
+                    "I do not like ice-cream", 
+                    "I hate ice-cream", 
+                    "I hardly like ice-cream",
+                    "Do you think I like ice-cream?")
+
+sentences_list %>%
+  get_sentences() %>%
+  sentiment
+
+
+```
+
+Notes for Sentiment by time:
+- Two fields: mean sentiment as a function of a day
+- Approx. Positive slope
+- Two extremely negative peaks, indicate sentiment about concerns over entire country fell
+- Terrible news can be a confounding factor
+
+## 2 Sentiment by time
+
+### 2.1 Mean Sentiment as a function of day
+
+```{r}
+A <-  (trigger %>%
+  dplyr::select(Trig_date,District,Chiefdom,t_q6))
+
+B <-  (trigger$t_q6 %>%
+         get_sentences() %>%
+  sentiment_by(by=NULL))
+
+sentiment_concerns <- cbind(A,B)
+
+sentiment_concerns$Trig_date <- as.Date(sentiment_concerns$Trig_date, "%m/%d/%Y")
+
+concerns_by_day <- sentiment_concerns %>%
+  dplyr::select(Trig_date,ave_sentiment)
+
+concerns_by_day <- concerns_by_day %>%
+  group_by(Trig_date) %>%
+  summarise(mean_sent = mean(ave_sentiment, na.rm = TRUE), std_sent = sd(ave_sentiment, na.rm = TRUE))
+
+require(ggplot2)
+ggplot( data = concerns_by_day, aes( x=Trig_date, y=value, color=variable)) + 
+  geom_line(aes(y=mean_sent, color = "mean_sent")) + 
+  geom_line(aes(y=std_sent, color = "std_sent")) + 
+  ggtitle('Mean Sentiment') + 
+  scale_x_date(labels = date_format("%m-%d-%y"), breaks = "3 week")
+
+#geom_point()
+
+concerns_by_day
+```
+
+### 2.2 Mean Sentiment as a function of month
+
+```{r}
+A <-  (trigger %>%
+  dplyr::select(Trig_date,District,Chiefdom,t_q6))
+
+B <-  (trigger$t_q6 %>%
+         get_sentences() %>%
+  sentiment_by(by=NULL))
+
+sentiment_concerns_cuts <- cbind(A,B)
+
+sentiment_concerns_cuts$Trig_date <- as.Date(sentiment_concerns_cuts$Trig_date, "%m/%d/%Y")
+sentiment_concerns_cuts$Trig_month <- as.Date(cut(sentiment_concerns_cuts$Trig_date,breaks = "month"))
+sentiment_concerns_cuts$Trig_week <- as.Date(cut(sentiment_concerns_cuts$Trig_date,breaks = "week",start.on.monday = FALSE))
+
+concerns_by_week <- sentiment_concerns_cuts %>%
+  dplyr::select(Trig_week,ave_sentiment)
+
+concerns_by_week <- concerns_by_week %>%
+  group_by(Trig_week) %>%
+  summarise(mean_sent = mean(ave_sentiment, na.rm = TRUE), std_sent = sd(ave_sentiment, na.rm = TRUE))
+
+concerns_by_month <- sentiment_concerns_cuts %>%
+  dplyr::select(Trig_month, ave_sentiment)
+
+concerns_by_month <- concerns_by_month %>%
+  group_by(Trig_month) %>%
+  summarise(mean_sent = mean(ave_sentiment, na.rm = TRUE), 
+            std_sent = sd(ave_sentiment, na.rm = TRUE),
+            cv_sent = cv(ave_sentiment,na.rm = TRUE))
+
+ggplot( data = concerns_by_month, aes( x=Trig_month, y=value, color=variable)) + 
+  geom_line(aes(y=mean_sent, color = "mean_sent"), size=2) + 
+  geom_line(aes(y=std_sent, color = "std_sent"),size =2) +
+  ggtitle('Mean Sentiment over months') +
+  scale_x_date(labels = date_format("%y-%m"), breaks = "1 month")
+
+```
+
+### 2.3 Mean Sentiment as a function of week
+
+```{r}
+ggplot( data = concerns_by_week, aes( x=Trig_week, y=value, color=variable)) + 
+  geom_line(aes(y=mean_sent, color = "mean_sent"),size=2) + 
+  geom_line(aes(y=std_sent, color = "std_sent"),size=2) + 
+  ggtitle('Mean Sentiment over weeks') +
+  scale_x_date(labels = date_format("%y-W%W"), breaks = "3 week")
+```
+
+
+## 3 Sentiment by space
+
+
+```{r}
+concerns_by_chiefdom <- sentiment_concerns %>%
+  dplyr::select(District, Chiefdom, ave_sentiment)
+
+concerns_by_chiefdom <- concerns_by_chiefdom %>%
+  group_by(District,Chiefdom) %>%
+  summarise(mean_ave = mean(ave_sentiment, na.rm = TRUE))
+
+
+concerns_by_district <- sentiment_concerns %>%
+  dplyr::select(District, ave_sentiment)
+
+concerns_by_district <- concerns_by_district %>%
+  group_by(District) %>%
+  summarise(mean_sent = mean(ave_sentiment, na.rm = TRUE),
+            sd_sent = sd(ave_sentiment,na.rm = TRUE),
+            cv_sent = cv(ave_sentiment,na.rm = TRUE))
+
+counts_by_district <- sentiment_concerns %>%
+  dplyr::select(District) %>%
+  group_by(District) %>%
+  summarise(count_sent = n())
+
+head(concerns_by_district)
+
+```
+
+### 3.1 Number of trigger visits across districts
+
+```{r}
+shp <- read_sf('./shp1/SLE_adm2.shp')
+district_df<-data.frame(shp$NAME_2,shp$geometry)
+
+plt <- ggplot()
+
+
+counts_plot <- district_df %>%
+  left_join(counts_by_district,by=c("shp.NAME_2"="District"))
+#write.csv(data.frame(shp$admin3Name,shp$admin3RefN,shp$admin2Name),file = "ShapeFile3.csv")
+
+plt + geom_sf(data = counts_plot, aes(fill=count_sent)) + scale_fill_gradient2(low='red',high='green',mid = 'yellow', midpoint = 800) + ggtitle("Number of trigger visits across Districts")
+
+```
+
+
+### 3.2 Mean sentiment across districts
+Notes and interpretations about sentiment by space:
+- Freetown and another district missing from the data
+- south-western part more negative sentiment
+- Measures against ebola may be better in other parts of the country 
+
+```{r}
+concerns_plot<-district_df %>%
+  left_join(concerns_by_district,by=c("shp.NAME_2"="District"))
+#write.csv(data.frame(shp$admin3Name,shp$admin3RefN,shp$admin2Name),file = "ShapeFile3.csv")
+plt <- ggplot()
+plt + geom_sf(data = concerns_plot, aes(fill=mean_sent)) + scale_fill_gradient2(low='red',high='green', mid='yellow',midpoint=-0.075) + ggtitle("Mean of Sentiments across Districts")
+```
+
+### 3.3 SD of sentiments across districts
+
+```{r}
+sd_max <- max(concerns_plot[!is.na(concerns_plot$sd_sent),]$sd_sent)
+sd_min <- min(concerns_plot[!is.na(concerns_plot$sd_sent),]$sd_sent)
+sd_mid <- (sd_max+sd_min)/2
+plt <- ggplot()
+plt + geom_sf(data = concerns_plot, aes(fill=sd_sent)) + scale_fill_gradient2(low='red',high='green', mid='yellow', midpoint=sd_mid) + ggtitle("Standard Deviation of Sentiments across Districts")
+```
+### 3.4 Co-efficient of variation of sentiments across districts
+
+```{r}
+cv_max <- max(concerns_plot[!is.na(concerns_plot$cv_sent),]$cv_sent)
+cv_min <- min(concerns_plot[!is.na(concerns_plot$cv_sent),]$cv_sent)
+cv_mid <- (cv_max+cv_min)/2
+plt <- ggplot()
+plt + geom_sf(data = concerns_plot, aes(fill=cv_sent)) + scale_fill_gradient2(low='red',high='green', mid='yellow', midpoint=cv_mid) + ggtitle("Variation of Sentiments across Districts")
+```
+
+```{r}
+head(concerns_plot)
+```
+
+## 4 Sentiment by time and space
+
+### 4.1 Mean sentiment by months across districts
+
+```{r}
+
+concerns_dis_mon <- sentiment_concerns %>%
+  dplyr::select(Trig_date,District, ave_sentiment)
+
+concerns_dis_mon$Trig_date <- as.Date(as.yearmon(concerns_dis_mon$Trig_date))
+#concerns_dis_mon$Trig_date <- as.Date(concerns_dis_mon$Trig_date, "%b %Y")
+
+concerns_dis_mon <- concerns_dis_mon %>%
+  group_by(District,Trig_date) %>%
+  summarise(mean_sent = mean(ave_sentiment, na.rm = TRUE))
+
+concerns_dis_mon
+ggplot( data = concerns_dis_mon, aes(x=Trig_date, y=mean_sent)) + geom_line(aes(color = District), size=2) + ggtitle('Mean Sentiment') + scale_x_date(name="Trig_date", date_labels = "%b %Y", breaks="month" )
+```
+### 4.2 Mean sentiment by weeks across districts
+
+```{r}
+concerns_dis_week <- sentiment_concerns %>%
+  dplyr::select(Trig_date,District, ave_sentiment)
+
+concerns_dis_week$Trig_week <- as.Date(cut(concerns_dis_week$Trig_date,breaks = "week",start.on.monday = FALSE))
+
+concerns_dis_week <- concerns_dis_week %>%
+  group_by(District,Trig_week) %>%
+  summarise(mean_sent = mean(ave_sentiment, na.rm = TRUE))
+
+concerns_dis_week
+ggplot( data = concerns_dis_week, aes(x=Trig_week, y=mean_sent)) + geom_line(aes(color = District)) + ggtitle('Mean Sentiment over weeks') + scale_x_date(name="Trig_week", date_labels = "%y-W%W", breaks="3 week" )
+```
+
+
+### 4.3 Mean sentiment by months across district (Animation)
+
+```{r}
+
+concerns_month_geo <-district_df %>%
+  left_join(concerns_dis_mon,by=c("shp.NAME_2"="District"))
+
+concerns_month_geo <- concerns_month_geo[!is.na(concerns_month_geo$Trig_date),]
+
+
+concerns_month_geo_animate <- ggplot() + geom_sf(data = concerns_month_geo, aes(fill=mean_sent,frame=Trig_date)) + scale_fill_gradient2(low='red',high='green', mid='white',midpoint=0) + transition_states(Trig_date, wrap=TRUE) + coord_sf() + theme_tufte() + labs(title = "Date") 
+## animate plot with gganimate
+animate(concerns_month_geo_animate, fps=3)
+
+#anim_save("animation.gif",animation=last_animation())
+
+#concerns_month_geo$Trig_month
+
+#concerns_month_geo
+
+```
+
+
+
